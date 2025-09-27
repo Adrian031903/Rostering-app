@@ -29,11 +29,19 @@ class UserUnitTests(unittest.TestCase):
     def test_get_json(self):
         user = User("bob", "bobpass")
         user_json = user.get_json()
-        self.assertDictEqual(user_json, {"id":None, "username":"bob"})
+        expected = {
+            "id": None, 
+            "username": "bob", 
+            "email": None, 
+            "role": "staff", 
+            "name": None
+        }
+        self.assertDictEqual(user_json, expected)
     
     def test_hashed_password(self):
         password = "mypass"
-        hashed = generate_password_hash(password, method='sha256')
+        # Use default method (pbkdf2) instead of deprecated sha256
+        hashed = generate_password_hash(password)
         user = User("bob", password)
         assert user.password != password
 
@@ -68,7 +76,11 @@ class UsersIntegrationTests(unittest.TestCase):
 
     def test_get_all_users_json(self):
         users_json = get_all_users_json()
-        self.assertListEqual([{"id":1, "username":"bob"}, {"id":2, "username":"rick"}], users_json)
+        expected = [
+            {"id": 1, "username": "bob", "email": None, "role": "staff", "name": None}, 
+            {"id": 2, "username": "rick", "email": None, "role": "staff", "name": None}
+        ]
+        self.assertListEqual(expected, users_json)
 
     # Tests data changes in the database
     def test_update_user(self):
