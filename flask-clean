@@ -1,3 +1,0 @@
-#!/bin/bash
-# Clean Flask command wrapper
-PYTHONWARNINGS=ignore::UserWarning flask "$@"

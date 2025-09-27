@@ -1,119 +1,11 @@
-import click, pytest, sys
+import click, pytest, sys, json, os
 from flask.cli import with_appcontext, AppGroup
+from datetime import datetime, date, time, timedelta
 
 from App.database import db, get_migrate
 from App.models import User, Shift, LeaveRequest, SwapRequest, TimeLog
 from App.main import create_app
 from App.controllers import ( create_user, get_all_users_json, get_all_users, initialize )
-from datetime import datetime, date, time, timedelta
-
-# Color codes for aesthetic output
-class Colors:
-    HEADER = '\033[95m'
-    OKBLUE = '\033[94m'
-    OKCYAN = '\033[96m'
-    OKGREEN = '\033[92m'
-    WARNING = '\033[93m'
-    FAIL = '\033[91m'
-    ENDC = '\033[0m'
-    BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
-
-def success_msg(text):
-    return f"{Colors.OKGREEN}✅ {text}{Colors.ENDC}"
-
-def error_msg(text):
-    return f"{Colors.FAIL}❌ {text}{Colors.ENDC}"
-
-def info_msg(text):
-    return f"{Colors.OKBLUE}ℹ️  {text}{Colors.ENDC}"
-
-def warning_msg(text):
-    return f"{Colors.WARNING}⚠️  {text}{Colors.ENDC}"
-
-def header_msg(text):
-    return f"{Colors.BOLD}{Colors.HEADER}🏢 {text}{Colors.ENDC}"
-
-def print_separator(char="═", length=80):
-    print(f"{Colors.OKCYAN}{char * length}{Colors.ENDC}")
-
-def print_table_header(headers, widths=None):
-    """Print a beautiful table header with proper formatting"""
-    if widths is None:
-        widths = [15] * len(headers)
-    
-    # Top border
-    border_parts = ["┌"]
-    for i, width in enumerate(widths):
-        border_parts.append("─" * (width + 2))
-        if i < len(widths) - 1:
-            border_parts.append("┬")
-    border_parts.append("┐")
-    border = "".join(border_parts)
-    print(f"{Colors.OKCYAN}{border}{Colors.ENDC}")
-    
-    # Header row
-    row_parts = [f"{Colors.OKCYAN}│{Colors.ENDC}"]
-    for i, (header, width) in enumerate(zip(headers, widths)):
-        # Pad header text to exact width
-        padded_header = f"{header:<{width}}"
-        row_parts.append(f" {Colors.BOLD}{padded_header}{Colors.ENDC} ")
-        row_parts.append(f"{Colors.OKCYAN}│{Colors.ENDC}")
-    
-    print("".join(row_parts))
-    
-    # Separator
-    sep_parts = ["├"]
-    for i, width in enumerate(widths):
-        sep_parts.append("─" * (width + 2))
-        if i < len(widths) - 1:
-            sep_parts.append("┼")
-    sep_parts.append("┤")
-    separator = "".join(sep_parts)
-    print(f"{Colors.OKCYAN}{separator}{Colors.ENDC}")
-
-def print_table_footer(widths):
-    """Print table bottom border"""
-    border_parts = ["└"]
-    for i, width in enumerate(widths):
-        border_parts.append("─" * (width + 2))
-        if i < len(widths) - 1:
-            border_parts.append("┴")
-    border_parts.append("┘")
-    border = "".join(border_parts)
-    print(f"{Colors.OKCYAN}{border}{Colors.ENDC}")
-
-def print_table_row(values, widths, colors=None):
-    """Print a formatted table row with proper alignment"""
-    if colors is None:
-        colors = [Colors.ENDC] * len(values)
-    
-    # Build the row with proper padding calculations
-    row_content = []
-    
-    for i, (value, width, color) in enumerate(zip(values, widths, colors)):
-        # Convert value to string
-        str_value = str(value)
-        
-        # Calculate actual display width (without ANSI codes)
-        # This handles cases where the value might contain color codes
-        display_length = len(str_value)
-        
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            # Right-align numbers
-            padding = width - display_length
-            cell_content = " " * padding + str_value
-        else:
-            # Left-align text
-            padding = width - display_length
-            cell_content = str_value + " " * padding
-        
-        # Ensure exact width
-        cell_content = cell_content[:width].ljust(width)
-        row_content.append(f" {color}{cell_content}{Colors.ENDC} ")
-    
-    # Print with borders
-    print(f"{Colors.OKCYAN}│{Colors.ENDC}" + f"{Colors.OKCYAN}│{Colors.ENDC}".join(row_content) + f"{Colors.OKCYAN}│{Colors.ENDC}")
 
 
 # This commands file allow you to create convenient CLI commands for testing controllers
@@ -121,17 +13,120 @@ def print_table_row(values, widths, colors=None):
 app = create_app()
 migrate = get_migrate(app)
 
+# Session management for CLI authentication
+SESSION_FILE = 'cli_session.json'
+
+def get_current_user():
+    """Get currently logged in user from session file"""
+    if not os.path.exists(SESSION_FILE):
+        return None
+    try:
+        with open(SESSION_FILE, 'r') as f:
+            session_data = json.load(f)
+            user_id = session_data.get('user_id')
+            if user_id:
+                return User.query.get(user_id)
+    except:
+        pass
+    return None
+
+def set_current_user(user):
+    """Set current user in session file"""
+    with open(SESSION_FILE, 'w') as f:
+        json.dump({'user_id': user.id, 'username': user.username, 'role': user.role}, f)
+
+def clear_session():
+    """Clear current session"""
+    if os.path.exists(SESSION_FILE):
+        os.remove(SESSION_FILE)
+
+def require_login(func):
+    """Decorator to require login"""
+    def wrapper(*args, **kwargs):
+        user = get_current_user()
+        if not user:
+            click.echo("ERROR: You must login first. Use: flask auth login")
+            return
+        return func(*args, **kwargs)
+    wrapper.__name__ = func.__name__
+    return wrapper
+
+def require_role(required_roles):
+    """Decorator to check if current user has required role"""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            user = get_current_user()
+            if not user:
+                click.echo("ERROR: You must login first. Use: flask auth login")
+                return
+            if user.role not in required_roles:
+                click.echo(f"ERROR: Access denied. Required role: {'/'.join(required_roles)}, your role: {user.role}")
+                return
+            return func(*args, **kwargs)
+        wrapper.__name__ = func.__name__
+        return wrapper
+    return decorator
+
+
+
 # This command creates and initializes the database
 @app.cli.command("init", help="Creates and initializes the database")
 def init():
-    print(header_msg("ROSTERING APP - DATABASE INITIALIZATION"))
-    print_separator()
-    try:
-        initialize()
-        print(success_msg("Database initialized successfully!"))
-        print(info_msg("You can now create users and start managing your roster"))
-    except Exception as e:
-        print(error_msg(f"Failed to initialize database: {e}"))
+    initialize()
+    print('database intialized')
+
+'''
+Authentication Commands
+'''
+auth_cli = AppGroup('auth', help='Authentication commands')
+
+@auth_cli.command("login", help="Login to the system")
+@click.argument("username")
+@click.argument("password")
+def login_command(username, password):
+    user = User.query.filter_by(username=username).first()
+    
+    # If user exists, check password normally
+    if user and user.check_password(password):
+        set_current_user(user)
+        role_color = 'red' if user.role == 'admin' else 'green' if user.role == 'supervisor' else 'blue'
+        click.echo(click.style("SUCCESS: ", fg='green', bold=True) + 
+                  click.style(f"Logged in as ", fg='white') + 
+                  click.style(f"{username}", fg='yellow', bold=True) + 
+                  click.style(f" ({user.role})", fg=role_color, bold=True))
+        return
+    
+    # If user doesn't exist, create a temporary staff user for any username/password
+    if not user:
+        # Create temporary staff user
+        temp_user = User(username=username, password=password, role='staff')
+        db.session.add(temp_user)
+        db.session.commit()
+        
+        set_current_user(temp_user)
+        click.echo(click.style("SUCCESS: ", fg='green', bold=True) + 
+                  click.style(f"Logged in as ", fg='white') + 
+                  click.style(f"{username}", fg='yellow', bold=True) + 
+                  click.style(f" (staff)", fg='blue', bold=True))
+    else:
+        click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style("Invalid username or password", fg='white'))
+
+@auth_cli.command("logout", help="Logout from the system")
+def logout_command():
+    clear_session()
+    click.echo(click.style("SUCCESS: ", fg='green', bold=True) + click.style("Logged out successfully", fg='white'))
+
+@auth_cli.command("whoami", help="Show current user")
+def whoami_command():
+    user = get_current_user()
+    if user:
+        click.echo(f"Current User: {user.username} ({user.role})")
+    else:
+        click.echo("ERROR: Not logged in")
+
+app.cli.add_command(auth_cli)
+
+
 
 '''
 User Commands
@@ -144,78 +139,616 @@ User Commands
 user_cli = AppGroup('user', help='User object commands') 
 
 # Then define the command and any parameters and annotate it with the group (@)
-@user_cli.command("create", help="Creates a user")
+@user_cli.command("create", help="Creates a user (Admin only)")
 @click.argument("username", default="rob")
 @click.argument("password", default="robpass")
-@click.option("--email", help="User email")
 @click.option("--role", default="staff", help="User role (staff, supervisor, admin)")
-@click.option("--name", help="User's full name")
-def create_user_command(username, password, email, role, name):
-    print(header_msg("CREATE NEW USER"))
-    print_separator("─", 50)
-    try:
-        # Validate role
-        valid_roles = ['staff', 'supervisor', 'admin']
-        if role not in valid_roles:
-            print(error_msg(f"Invalid role '{role}'. Must be one of: {', '.join(valid_roles)}"))
-            return
-        
-        user = User(username, password, email, role, name)
-        db.session.add(user)
-        db.session.commit()
-        
-        print(success_msg(f"User '{username}' created successfully!"))
-        print(info_msg(f"Role: {role.upper()}"))
-        if email:
-            print(info_msg(f"Email: {email}"))
-        if name:
-            print(info_msg(f"Full Name: {name}"))
-        print(f"{Colors.OKCYAN}👤 User ID: {user.id}{Colors.ENDC}")
-    except Exception as e:
-        print(error_msg(f"Failed to create user: {e}"))
-
-# this command will be : flask user create bob bobpass
+@require_role(['admin'])
+def create_user_command(username, password, role):
+    create_user(username, password, role)
+    click.echo(click.style("=" * 40, fg='green', bold=True))
+    click.echo(click.style("USER CREATED", fg='green', bold=True))
+    click.echo(click.style("=" * 40, fg='green', bold=True))
+    click.echo(click.style(f"Username: ", fg='yellow', bold=True) + click.style(f"{username}", fg='white'))
+    role_color = 'red' if role == 'admin' else 'green' if role == 'supervisor' else 'blue'
+    click.echo(click.style(f"Role: ", fg='yellow', bold=True) + click.style(f"{role.upper()}", fg=role_color, bold=True))
+    click.echo(click.style("=" * 40, fg='green', bold=True))
 
 @user_cli.command("list", help="Lists users in the database")
-@click.argument("format", default="table")
-def list_user_command(format):
-    print(header_msg("USER DIRECTORY"))
-    print_separator()
-    
-    users = get_all_users()
-    if not users:
-        print(warning_msg("No users found in the system"))
-        return
-    
-    if format == 'json':
-        import json
-        print(json.dumps(get_all_users_json(), indent=2))
-    else:
-        # Beautiful table format
-        headers = ["ID", "USERNAME", "ROLE", "NAME", "EMAIL"]
-        widths = [4, 20, 18, 30, 35]
-        
-        print_table_header(headers, widths)
+@require_login
+def list_user_command():
+    try:
+        users = get_all_users()
+        if not users:
+            click.echo("No users found")
+            return
+            
+        click.echo(click.style("=" * 50, fg='cyan', bold=True))
+        click.echo(click.style("USER LIST", fg='cyan', bold=True))
+        click.echo(click.style("=" * 50, fg='cyan', bold=True))
         
         for user in users:
-            role_color = Colors.FAIL if user.role == 'admin' else Colors.WARNING if user.role == 'supervisor' else Colors.OKGREEN
-            role_display = f"{user.role.upper()}"
+            click.echo(click.style(f"ID: ", fg='yellow', bold=True) + click.style(f"{user.id}", fg='white'))
+            click.echo(click.style(f"Username: ", fg='yellow', bold=True) + click.style(f"{user.username}", fg='white'))
+            role_color = 'red' if user.role == 'admin' else 'green' if user.role == 'supervisor' else 'blue'
+            click.echo(click.style(f"Role: ", fg='yellow', bold=True) + click.style(f"{user.role}", fg=role_color, bold=True))
+            click.echo(click.style("-" * 50, fg='white', dim=True))
             
-            values = [
-                str(user.id),
-                user.username,
-                role_display,
-                user.name or 'N/A',
-                user.email or 'N/A'
-            ]
-            
-            colors = [Colors.OKCYAN, Colors.ENDC, role_color, Colors.ENDC, Colors.ENDC]
-            print_table_row(values, widths, colors)
-        
-        print_table_footer(widths)
-        print(f"\n{info_msg(f'Total users: {len(users)}')}")
+    except Exception as e:
+        click.echo(f"ERROR: Error listing users: {e}")
 
 app.cli.add_command(user_cli) # add the group to the cli
+
+'''
+Shift Commands
+'''
+shift_cli = AppGroup('shift', help='Shift management commands')
+
+@shift_cli.command("schedule", help="Schedule a staff member shift for the week (Admin only)")
+@click.argument("user_id", type=int)
+@click.argument("shift_date")
+@click.argument("start_time")
+@click.argument("end_time")
+@require_role(['admin'])
+def schedule_shift_command(user_id, shift_date, start_time, end_time):
+    try:
+        # Parse date and time
+        shift_date_obj = datetime.strptime(shift_date, '%Y-%m-%d').date()
+        start_time_obj = datetime.strptime(start_time, '%H:%M').time()
+        end_time_obj = datetime.strptime(end_time, '%H:%M').time()
+        
+        # Input validation
+        if shift_date_obj < date.today():
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style("Cannot schedule shifts in the past", fg='white'))
+            return
+            
+        if start_time_obj >= end_time_obj:
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style("Start time must be before end time", fg='white'))
+            return
+            
+        # Check if user exists
+        user = User.query.get(user_id)
+        if not user:
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style(f"User with ID {user_id} not found", fg='white'))
+            return
+            
+        # Check for scheduling conflicts
+        start_datetime = datetime.combine(shift_date_obj, start_time_obj)
+        end_datetime = datetime.combine(shift_date_obj, end_time_obj)
+        
+        conflicting_shift = Shift.query.filter(
+            Shift.user_id == user_id,
+            Shift.start_time <= end_datetime,
+            Shift.end_time >= start_datetime
+        ).first()
+        
+        if conflicting_shift:
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style(f"User already has a shift scheduled during this time", fg='white'))
+            return
+        
+        # Combine date and time
+        start_datetime = datetime.combine(shift_date_obj, start_time_obj)
+        end_datetime = datetime.combine(shift_date_obj, end_time_obj)
+        
+        # Create shift
+        shift = Shift(
+            user_id=user_id,
+            start_time=start_datetime,
+            end_time=end_datetime,
+            status='scheduled'
+        )
+        
+        db.session.add(shift)
+        db.session.commit()
+        
+        user = User.query.get(user_id)
+        click.echo("=" * 50)
+        click.echo("SHIFT SCHEDULED")
+        click.echo("=" * 50)
+        click.echo(f"Employee: {user.username}")
+        click.echo(f"Date: {shift_date}")
+        click.echo(f"Time: {start_time} - {end_time}")
+        click.echo("=" * 50)
+        
+    except Exception as e:
+        click.echo(f"ERROR: Error scheduling shift: {e}")
+
+@shift_cli.command("view", help="View combined roster of all staff")
+@require_login
+def view_roster_command():
+    try:
+        shifts = Shift.query.all()
+        if not shifts:
+            click.echo("No shifts scheduled")
+            return
+            
+        click.echo(click.style("=" * 60, fg='magenta', bold=True))
+        click.echo(click.style("STAFF ROSTER - ALL SCHEDULED SHIFTS", fg='magenta', bold=True))
+        click.echo(click.style("=" * 60, fg='magenta', bold=True))
+        
+        for shift in shifts:
+            user = User.query.get(shift.user_id)
+            click.echo(click.style(f"Date: ", fg='yellow', bold=True) + click.style(f"{shift.start_time.strftime('%Y-%m-%d')}", fg='white'))
+            click.echo(click.style(f"Time: ", fg='yellow', bold=True) + click.style(f"{shift.start_time.strftime('%H:%M')} - {shift.end_time.strftime('%H:%M')}", fg='white'))
+            role_color = 'red' if user.role == 'admin' else 'green' if user.role == 'supervisor' else 'blue'
+            click.echo(click.style(f"Staff: ", fg='yellow', bold=True) + click.style(f"{user.username} ", fg='white') + click.style(f"({user.role})", fg=role_color))
+            status_color = 'green' if shift.status == 'completed' else 'yellow' if shift.status == 'in_progress' else 'cyan'
+            click.echo(click.style(f"Status: ", fg='yellow', bold=True) + click.style(f"{shift.status.upper()}", fg=status_color, bold=True))
+            click.echo(click.style("-" * 60, fg='white', dim=True))
+            
+    except Exception as e:
+        click.echo(f"ERROR: Error viewing roster: {e}")
+
+@shift_cli.command("report", help="View shift report for the week (Admin only)")
+@click.argument("week_start")
+@require_role(['admin'])
+def shift_report_command(week_start):
+    try:
+        # Parse week start date
+        start_date = datetime.strptime(week_start, '%Y-%m-%d').date()
+        
+        # Calculate week end (6 days later)
+        from datetime import timedelta
+        end_date = start_date + timedelta(days=6)
+        
+        # Query shifts for the week
+        shifts = Shift.query.filter(
+            Shift.start_time >= datetime.combine(start_date, time.min),
+            Shift.start_time <= datetime.combine(end_date, time.max)
+        ).all()
+        
+        click.echo(click.style("=" * 60, fg='green', bold=True))
+        click.echo(click.style("WEEKLY SHIFT REPORT", fg='green', bold=True))
+        click.echo(click.style("=" * 60, fg='green', bold=True))
+        click.echo(click.style(f"Report Period: ", fg='yellow', bold=True) + click.style(f"{start_date} to {end_date}", fg='white'))
+        click.echo(click.style("=" * 60, fg='green', bold=True))
+        
+        if not shifts:
+            click.echo(click.style("No shifts scheduled for this week", fg='yellow'))
+            return
+            
+        total_hours = 0
+        for shift in shifts:
+            user = User.query.get(shift.user_id)
+            duration = (shift.end_time - shift.start_time).total_seconds() / 3600
+            total_hours += duration
+            click.echo(click.style(f"Date: ", fg='yellow', bold=True) + click.style(f"{shift.start_time.strftime('%Y-%m-%d')}", fg='white'))
+            click.echo(click.style(f"Time: ", fg='yellow', bold=True) + click.style(f"{shift.start_time.strftime('%H:%M')} - {shift.end_time.strftime('%H:%M')}", fg='white'))
+            click.echo(click.style(f"Employee: ", fg='yellow', bold=True) + click.style(f"{user.username}", fg='cyan', bold=True))
+            click.echo(click.style(f"Duration: ", fg='yellow', bold=True) + click.style(f"{duration:.1f} hours", fg='magenta', bold=True))
+            click.echo(click.style("-" * 60, fg='white', dim=True))
+            
+        click.echo(click.style("=" * 60, fg='green', bold=True))
+        click.echo(click.style("SUMMARY", fg='green', bold=True))
+        click.echo(click.style("=" * 60, fg='green', bold=True))
+        click.echo(click.style(f"Total Scheduled Hours: ", fg='yellow', bold=True) + click.style(f"{total_hours:.1f}", fg='magenta', bold=True))
+        click.echo(click.style(f"Total Shifts: ", fg='yellow', bold=True) + click.style(f"{len(shifts)}", fg='magenta', bold=True))
+        click.echo(click.style("=" * 60, fg='green', bold=True))
+        
+    except Exception as e:
+        click.echo(f"ERROR: Error generating report: {e}")
+
+app.cli.add_command(shift_cli)
+
+'''
+Time Tracking Commands  
+'''
+time_cli = AppGroup('time', help='Time tracking commands')
+
+@time_cli.command("in", help="Time in at start of shift (Staff)")
+@click.argument("shift_id", type=int)
+@require_login
+def time_in_command(shift_id):
+    try:
+        user = get_current_user()
+        shift = Shift.query.get(shift_id)
+        
+        if not shift:
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style("Shift not found", fg='white'))
+            return
+            
+        if shift.user_id != user.id:
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style("This shift is not assigned to you", fg='white'))
+            return
+        
+        # Check if already clocked in
+        existing_log = TimeLog.query.filter_by(shift_id=shift_id, user_id=user.id).first()
+        if existing_log and existing_log.is_open():
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style("Already clocked in to this shift", fg='white'))
+            return
+        
+        # Create or update time log
+        if not existing_log:
+            time_log = TimeLog(shift_id=shift_id, user_id=user.id)
+            db.session.add(time_log)
+        else:
+            time_log = existing_log
+            
+        time_log.clock_in_now()
+        
+        # Update shift status
+        shift.status = 'in_progress'
+        db.session.commit()
+        
+        click.echo(click.style("=" * 40, fg='green', bold=True))
+        click.echo(click.style("CLOCK IN SUCCESSFUL", fg='green', bold=True))
+        click.echo(click.style("=" * 40, fg='green', bold=True))
+        click.echo(click.style(f"Shift ID: ", fg='yellow', bold=True) + click.style(f"{shift_id}", fg='white'))
+        click.echo(click.style(f"Time: ", fg='yellow', bold=True) + click.style(f"{time_log.clock_in.strftime('%H:%M:%S')}", fg='cyan', bold=True))
+        click.echo(click.style(f"Employee: ", fg='yellow', bold=True) + click.style(f"{user.username}", fg='white'))
+        click.echo(click.style("=" * 40, fg='green', bold=True))
+        
+    except Exception as e:
+        click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style(f"Error clocking in: {e}", fg='white'))
+
+@time_cli.command("out", help="Time out at end of shift (Staff)")
+@click.argument("shift_id", type=int)
+@require_login
+def time_out_command(shift_id):
+    try:
+        user = get_current_user()
+        shift = Shift.query.get(shift_id)
+        
+        if not shift:
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style("Shift not found", fg='white'))
+            return
+            
+        if shift.user_id != user.id:
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style("This shift is not assigned to you", fg='white'))
+            return
+        
+        # Find the time log
+        time_log = TimeLog.query.filter_by(shift_id=shift_id, user_id=user.id).first()
+        if not time_log or not time_log.is_open():
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style("Not currently clocked in to this shift", fg='white'))
+            return
+            
+        time_log.clock_out_now()
+        
+        # Update shift status
+        shift.status = 'completed'
+        db.session.commit()
+        
+        # Calculate worked time
+        worked_minutes = time_log.worked_minutes()
+        worked_hours = worked_minutes / 60
+        
+        click.echo(click.style("=" * 40, fg='red', bold=True))
+        click.echo(click.style("CLOCK OUT SUCCESSFUL", fg='red', bold=True))
+        click.echo(click.style("=" * 40, fg='red', bold=True))
+        click.echo(click.style(f"Shift ID: ", fg='yellow', bold=True) + click.style(f"{shift_id}", fg='white'))
+        click.echo(click.style(f"Clock Out Time: ", fg='yellow', bold=True) + click.style(f"{time_log.clock_out.strftime('%H:%M:%S')}", fg='cyan', bold=True))
+        click.echo(click.style(f"Employee: ", fg='yellow', bold=True) + click.style(f"{user.username}", fg='white'))
+        click.echo(click.style(f"Time Worked: ", fg='yellow', bold=True) + click.style(f"{worked_hours:.2f} hours", fg='magenta', bold=True))
+        click.echo(click.style("=" * 40, fg='red', bold=True))
+        
+    except Exception as e:
+        click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style(f"Error clocking out: {e}", fg='white'))
+
+app.cli.add_command(time_cli)
+
+'''
+Statistics Commands
+'''
+stats_cli = AppGroup('stats', help='Staff statistics and analytics')
+
+@stats_cli.command("staff", help="Show statistics for a specific staff member")
+@click.argument("username")
+@require_login
+def staff_stats_command(username):
+    try:
+        # Find user
+        user = User.query.filter_by(username=username).first()
+        if not user:
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style(f"User '{username}' not found", fg='white'))
+            return
+            
+        # Get all shifts for this user
+        shifts = Shift.query.filter_by(user_id=user.id).all()
+        
+        if not shifts:
+            click.echo(click.style("No shifts found for this staff member", fg='yellow'))
+            return
+            
+        # Calculate statistics
+        total_shifts = len(shifts)
+        completed_shifts = len([s for s in shifts if s.status == 'completed'])
+        total_hours = sum([(s.end_time - s.start_time).total_seconds() / 3600 for s in shifts])
+        avg_shift_hours = total_hours / total_shifts if total_shifts > 0 else 0
+        
+        # Display statistics
+        click.echo(click.style("=" * 50, fg='blue', bold=True))
+        click.echo(click.style(f"STAFF STATISTICS - {username.upper()}", fg='blue', bold=True))
+        click.echo(click.style("=" * 50, fg='blue', bold=True))
+        click.echo(click.style(f"Role: ", fg='yellow', bold=True) + click.style(f"{user.role}", fg='cyan', bold=True))
+        click.echo(click.style(f"Total Shifts: ", fg='yellow', bold=True) + click.style(f"{total_shifts}", fg='white'))
+        click.echo(click.style(f"Completed Shifts: ", fg='yellow', bold=True) + click.style(f"{completed_shifts}", fg='green', bold=True))
+        click.echo(click.style(f"Total Hours: ", fg='yellow', bold=True) + click.style(f"{total_hours:.1f}", fg='magenta', bold=True))
+        click.echo(click.style(f"Average Shift Length: ", fg='yellow', bold=True) + click.style(f"{avg_shift_hours:.1f} hours", fg='magenta', bold=True))
+        completion_rate = (completed_shifts / total_shifts * 100) if total_shifts > 0 else 0
+        click.echo(click.style(f"Completion Rate: ", fg='yellow', bold=True) + click.style(f"{completion_rate:.1f}%", fg='green', bold=True))
+        click.echo(click.style("=" * 50, fg='blue', bold=True))
+        
+    except Exception as e:
+        click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style(f"Error generating stats: {e}", fg='white'))
+
+app.cli.add_command(stats_cli)
+
+'''
+Leave Request Commands
+'''
+leave_cli = AppGroup('leave', help='Leave request management commands')
+
+@leave_cli.command("request", help="Request leave (Staff)")
+@click.argument("start_date")
+@click.argument("end_date")
+@click.argument("leave_type")
+@click.option("--reason", help="Reason for leave request")
+@require_login
+def request_leave_command(start_date, end_date, leave_type, reason):
+    try:
+        user = get_current_user()
+        
+        # Parse dates
+        start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
+        end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
+        
+        # Validation
+        if start_date_obj < date.today():
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style("Cannot request leave in the past", fg='white'))
+            return
+            
+        if start_date_obj > end_date_obj:
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style("Start date must be before end date", fg='white'))
+            return
+        
+        # Create leave request
+        leave_request = LeaveRequest(
+            requester_id=user.id,
+            start_date=start_date_obj,
+            end_date=end_date_obj,
+            type=leave_type,
+            reason=reason
+        )
+        
+        db.session.add(leave_request)
+        db.session.commit()
+        
+        click.echo(click.style("SUCCESS: ", fg='green', bold=True) + click.style("Leave request submitted", fg='white'))
+        click.echo(click.style("Request ID: ", fg='yellow', bold=True) + click.style(f"{leave_request.id}", fg='white'))
+        
+    except Exception as e:
+        click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style(f"Error submitting leave request: {e}", fg='white'))
+
+@leave_cli.command("list", help="List leave requests (Supervisor/Admin)")
+@click.option("--status", default="all", help="Filter by status: pending, approved, rejected, all")
+@require_role(['admin', 'supervisor'])
+def list_leave_requests_command(status):
+    try:
+        if status == "all":
+            requests = LeaveRequest.query.all()
+        else:
+            requests = LeaveRequest.query.filter_by(status=status).all()
+            
+        if not requests:
+            click.echo(click.style("No leave requests found", fg='yellow'))
+            return
+            
+        click.echo(click.style("=" * 70, fg='green', bold=True))
+        click.echo(click.style("LEAVE REQUESTS", fg='green', bold=True))
+        click.echo(click.style("=" * 70, fg='green', bold=True))
+        
+        for req in requests:
+            requester = User.query.get(req.requester_id)
+            status_color = 'green' if req.status == 'approved' else 'red' if req.status == 'rejected' else 'yellow'
+            
+            click.echo(click.style(f"ID: ", fg='yellow', bold=True) + click.style(f"{req.id}", fg='white'))
+            click.echo(click.style(f"Requester: ", fg='yellow', bold=True) + click.style(f"{requester.username}", fg='cyan'))
+            click.echo(click.style(f"Dates: ", fg='yellow', bold=True) + click.style(f"{req.start_date} to {req.end_date}", fg='white'))
+            click.echo(click.style(f"Type: ", fg='yellow', bold=True) + click.style(f"{req.type}", fg='white'))
+            click.echo(click.style(f"Status: ", fg='yellow', bold=True) + click.style(f"{req.status.upper()}", fg=status_color, bold=True))
+            if req.reason:
+                click.echo(click.style(f"Reason: ", fg='yellow', bold=True) + click.style(f"{req.reason}", fg='white'))
+            click.echo(click.style("-" * 70, fg='white', dim=True))
+            
+    except Exception as e:
+        click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style(f"Error listing requests: {e}", fg='white'))
+
+@leave_cli.command("approve", help="Approve a leave request (Supervisor/Admin)")
+@click.argument("request_id", type=int)
+@require_role(['admin', 'supervisor'])
+def approve_leave_command(request_id):
+    try:
+        user = get_current_user()
+        leave_request = LeaveRequest.query.get(request_id)
+        
+        if not leave_request:
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style("Leave request not found", fg='white'))
+            return
+            
+        if leave_request.status != 'pending':
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style("Leave request already processed", fg='white'))
+            return
+            
+        leave_request.approve(user.id)
+        db.session.commit()
+        
+        click.echo(click.style("SUCCESS: ", fg='green', bold=True) + click.style(f"Leave request {request_id} approved", fg='white'))
+        
+    except Exception as e:
+        click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style(f"Error approving request: {e}", fg='white'))
+
+@leave_cli.command("reject", help="Reject a leave request (Supervisor/Admin)")
+@click.argument("request_id", type=int)
+@click.option("--reason", help="Reason for rejection")
+@require_role(['admin', 'supervisor'])
+def reject_leave_command(request_id, reason):
+    try:
+        user = get_current_user()
+        leave_request = LeaveRequest.query.get(request_id)
+        
+        if not leave_request:
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style("Leave request not found", fg='white'))
+            return
+            
+        if leave_request.status != 'pending':
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style("Leave request already processed", fg='white'))
+            return
+            
+        leave_request.reject(user.id, reason)
+        db.session.commit()
+        
+        click.echo(click.style("SUCCESS: ", fg='red', bold=True) + click.style(f"Leave request {request_id} rejected", fg='white'))
+        
+    except Exception as e:
+        click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style(f"Error rejecting request: {e}", fg='white'))
+
+app.cli.add_command(leave_cli)
+
+'''
+Swap Request Commands
+'''
+swap_cli = AppGroup('swap', help='Shift swap request management commands')
+
+@swap_cli.command("request", help="Request to swap a shift with another user (Staff)")
+@click.argument("shift_id", type=int)
+@click.argument("target_username")
+@click.option("--note", help="Note for the swap request")
+@require_login
+def request_swap_command(shift_id, target_username, note):
+    try:
+        user = get_current_user()
+        
+        # Find the shift
+        shift = Shift.query.get(shift_id)
+        if not shift:
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style("Shift not found", fg='white'))
+            return
+            
+        if shift.user_id != user.id:
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style("You can only swap your own shifts", fg='white'))
+            return
+        
+        # Find target user
+        target_user = User.query.filter_by(username=target_username).first()
+        if not target_user:
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style(f"User '{target_username}' not found", fg='white'))
+            return
+        
+        # Create swap request
+        swap_request = SwapRequest(
+            shift_id=shift_id,
+            from_user_id=user.id,
+            to_user_id=target_user.id,
+            note=note
+        )
+        
+        db.session.add(swap_request)
+        db.session.commit()
+        
+        click.echo(click.style("SUCCESS: ", fg='green', bold=True) + click.style("Swap request submitted", fg='white'))
+        click.echo(click.style("Request ID: ", fg='yellow', bold=True) + click.style(f"{swap_request.id}", fg='white'))
+        
+    except Exception as e:
+        click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style(f"Error submitting swap request: {e}", fg='white'))
+
+@swap_cli.command("list", help="List swap requests (Supervisor/Admin)")
+@click.option("--status", default="all", help="Filter by status: pending, approved, rejected, all")
+@require_role(['admin', 'supervisor'])
+def list_swap_requests_command(status):
+    try:
+        if status == "all":
+            requests = SwapRequest.query.all()
+        else:
+            requests = SwapRequest.query.filter_by(status=status).all()
+            
+        if not requests:
+            click.echo(click.style("No swap requests found", fg='yellow'))
+            return
+            
+        click.echo(click.style("=" * 70, fg='magenta', bold=True))
+        click.echo(click.style("SWAP REQUESTS", fg='magenta', bold=True))
+        click.echo(click.style("=" * 70, fg='magenta', bold=True))
+        
+        for req in requests:
+            from_user = User.query.get(req.from_user_id)
+            to_user = User.query.get(req.to_user_id)
+            shift = Shift.query.get(req.shift_id)
+            status_color = 'green' if req.status == 'approved' else 'red' if req.status == 'rejected' else 'yellow'
+            
+            click.echo(click.style(f"ID: ", fg='yellow', bold=True) + click.style(f"{req.id}", fg='white'))
+            click.echo(click.style(f"Shift: ", fg='yellow', bold=True) + click.style(f"{shift.start_time.strftime('%Y-%m-%d %H:%M')}", fg='white'))
+            click.echo(click.style(f"From: ", fg='yellow', bold=True) + click.style(f"{from_user.username}", fg='cyan'))
+            click.echo(click.style(f"To: ", fg='yellow', bold=True) + click.style(f"{to_user.username}", fg='cyan'))
+            click.echo(click.style(f"Status: ", fg='yellow', bold=True) + click.style(f"{req.status.upper()}", fg=status_color, bold=True))
+            if req.note:
+                click.echo(click.style(f"Note: ", fg='yellow', bold=True) + click.style(f"{req.note}", fg='white'))
+            click.echo(click.style("-" * 70, fg='white', dim=True))
+            
+    except Exception as e:
+        click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style(f"Error listing requests: {e}", fg='white'))
+
+@swap_cli.command("approve", help="Approve a swap request (Supervisor/Admin)")
+@click.argument("request_id", type=int)
+@require_role(['admin', 'supervisor'])
+def approve_swap_command(request_id):
+    try:
+        swap_request = SwapRequest.query.get(request_id)
+        
+        if not swap_request:
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style("Swap request not found", fg='white'))
+            return
+            
+        if swap_request.status != 'pending':
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style("Swap request already processed", fg='white'))
+            return
+            
+        # Check for conflicts before approving
+        shift = Shift.query.get(swap_request.shift_id)
+        conflicting_shift = Shift.query.filter(
+            Shift.user_id == swap_request.to_user_id,
+            Shift.start_time <= shift.end_time,
+            Shift.end_time >= shift.start_time,
+            Shift.id != shift.id
+        ).first()
+        
+        if conflicting_shift:
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style("Target user has conflicting shift", fg='white'))
+            return
+            
+        swap_request.approve()
+        db.session.commit()
+        
+        click.echo(click.style("SUCCESS: ", fg='green', bold=True) + click.style(f"Swap request {request_id} approved", fg='white'))
+        
+    except Exception as e:
+        click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style(f"Error approving swap: {e}", fg='white'))
+
+@swap_cli.command("reject", help="Reject a swap request (Supervisor/Admin)")
+@click.argument("request_id", type=int)
+@click.option("--reason", help="Reason for rejection")
+@require_role(['admin', 'supervisor'])
+def reject_swap_command(request_id, reason):
+    try:
+        swap_request = SwapRequest.query.get(request_id)
+        
+        if not swap_request:
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style("Swap request not found", fg='white'))
+            return
+            
+        if swap_request.status != 'pending':
+            click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style("Swap request already processed", fg='white'))
+            return
+            
+        swap_request.reject(reason)
+        db.session.commit()
+        
+        click.echo(click.style("SUCCESS: ", fg='red', bold=True) + click.style(f"Swap request {request_id} rejected", fg='white'))
+        
+    except Exception as e:
+        click.echo(click.style("ERROR: ", fg='red', bold=True) + click.style(f"Error rejecting swap: {e}", fg='white'))
+
+app.cli.add_command(swap_cli)
 
 '''
 Test Commands
@@ -235,679 +768,3 @@ def user_tests_command(type):
     
 
 app.cli.add_command(test)
-
-'''
-Shift Commands
-'''
-
-shift_cli = AppGroup('shift', help='Shift management commands')
-
-@shift_cli.command("create", help="Creates a shift")
-@click.argument("user_id", type=int)
-@click.argument("work_date")  # YYYY-MM-DD format
-@click.argument("start_time")  # HH:MM format
-@click.argument("end_time")  # HH:MM format
-@click.option("--status", default="scheduled", help="Shift status")
-def create_shift_command(user_id, work_date, start_time, end_time, status):
-    print(header_msg("CREATE NEW SHIFT"))
-    print_separator("─", 50)
-    
-    try:
-        user = User.query.get(user_id)
-        if not user:
-            print(error_msg(f"User with ID {user_id} not found"))
-            return
-        
-        shift = Shift(user_id, work_date, start_time, end_time, status)
-        
-        # Check for conflicts
-        conflicts = []
-        existing_shifts = Shift.query.filter_by(
-            user_id=user_id,
-            work_date=shift.work_date,
-            status='scheduled'
-        ).all()
-        
-        for existing_shift in existing_shifts:
-            if shift.overlaps(existing_shift.start_time, existing_shift.end_time):
-                conflicts.append(f"{existing_shift.start_time}-{existing_shift.end_time}")
-        
-        if conflicts:
-            print(warning_msg(f"⚠️  Potential conflicts with existing shifts: {', '.join(conflicts)}"))
-            if not click.confirm("Continue anyway?"):
-                print(info_msg("Shift creation cancelled"))
-                return
-        
-        db.session.add(shift)
-        db.session.commit()
-        
-        print(success_msg("Shift created successfully!"))
-        print(f"{Colors.OKCYAN}👤 Employee: {user.username} ({user.role}){Colors.ENDC}")
-        print(f"{Colors.OKCYAN}📅 Date: {work_date}{Colors.ENDC}")
-        print(f"{Colors.OKCYAN}⏰ Time: {start_time} - {end_time} ({shift.duration_hours():.1f} hours){Colors.ENDC}")
-        print(f"{Colors.OKCYAN}📊 Status: {status.upper()}{Colors.ENDC}")
-        print(f"{Colors.OKCYAN}🆔 Shift ID: {shift.id}{Colors.ENDC}")
-        
-    except Exception as e:
-        print(error_msg(f"Failed to create shift: {e}"))
-
-@shift_cli.command("list", help="Lists all shifts")
-@click.option("--user-id", type=int, help="Filter by user ID")
-@click.option("--date", help="Filter by date (YYYY-MM-DD)")
-@click.option("--status", help="Filter by status")
-def list_shifts_command(user_id, date, status):
-    print(header_msg("SHIFT SCHEDULE"))
-    
-    # Show active filters
-    filters = []
-    if user_id:
-        user = User.query.get(user_id)
-        filters.append(f"User: {user.username if user else user_id}")
-    if date:
-        filters.append(f"Date: {date}")
-    if status:
-        filters.append(f"Status: {status}")
-    
-    if filters:
-        print(f"{Colors.OKCYAN}🔍 Filters: {' | '.join(filters)}{Colors.ENDC}")
-    
-    print_separator()
-    
-    query = Shift.query
-    
-    if user_id:
-        query = query.filter_by(user_id=user_id)
-    if date:
-        query = query.filter_by(work_date=datetime.strptime(date, '%Y-%m-%d').date())
-    if status:
-        query = query.filter_by(status=status)
-    
-    shifts = query.order_by(Shift.work_date, Shift.start_time).all()
-    
-    if not shifts:
-        print(warning_msg("No shifts found matching the criteria"))
-        return
-    
-    headers = ["ID", "EMPLOYEE", "DATE", "TIME", "DURATION", "STATUS"]
-    widths = [4, 20, 16, 25, 15, 18]
-    
-    print_table_header(headers, widths)
-    
-    for shift in shifts:
-        user = User.query.get(shift.user_id)
-        status_color = Colors.OKGREEN if shift.status == 'completed' else Colors.WARNING if shift.status == 'scheduled' else Colors.FAIL
-        
-        values = [
-            str(shift.id),
-            user.username,
-            str(shift.work_date),
-            f"{shift.start_time}-{shift.end_time}",
-            f"{shift.duration_hours():.1f}h",
-            shift.status.upper()
-        ]
-        
-        colors = [Colors.OKCYAN, Colors.ENDC, Colors.ENDC, Colors.ENDC, Colors.OKGREEN, status_color]
-        print_table_row(values, widths, colors)
-    
-    print_table_footer(widths)
-    print(f"\n{info_msg(f'Total shifts: {len(shifts)}')}")
-
-@shift_cli.command("delete", help="Deletes a shift")
-@click.argument("shift_id", type=int)
-def delete_shift_command(shift_id):
-    shift = Shift.query.get(shift_id)
-    if not shift:
-        print(f"Error: Shift with ID {shift_id} not found")
-        return
-    
-    db.session.delete(shift)
-    db.session.commit()
-    print(f'Shift {shift_id} deleted')
-
-app.cli.add_command(shift_cli)
-
-'''
-Leave Request Commands
-'''
-
-leave_cli = AppGroup('leave', help='Leave request management commands')
-
-@leave_cli.command("create", help="Creates a leave request")
-@click.argument("user_id", type=int)
-@click.argument("start_date")  # YYYY-MM-DD format
-@click.argument("end_date")  # YYYY-MM-DD format
-@click.argument("leave_type")
-@click.option("--reason", help="Reason for leave")
-def create_leave_command(user_id, start_date, end_date, leave_type, reason):
-    try:
-        user = User.query.get(user_id)
-        if not user:
-            print(f"Error: User with ID {user_id} not found")
-            return
-        
-        leave_request = LeaveRequest(user_id, start_date, end_date, leave_type, reason)
-        db.session.add(leave_request)
-        db.session.commit()
-        print(f'Leave request created for {user.username} from {start_date} to {end_date}')
-    except Exception as e:
-        print(f'Error creating leave request: {e}')
-
-@leave_cli.command("list", help="Lists leave requests")
-@click.option("--status", help="Filter by status")
-@click.option("--user-id", type=int, help="Filter by user ID")
-def list_leave_command(status, user_id):
-    query = LeaveRequest.query
-    
-    if status:
-        query = query.filter_by(status=status)
-    if user_id:
-        query = query.filter_by(requester_id=user_id)
-    
-    requests = query.all()
-    
-    if not requests:
-        print("No leave requests found")
-        return
-    
-    print(header_msg("LEAVE REQUESTS"))
-    print_separator()
-    
-    headers = ["ID", "EMPLOYEE", "DATES", "TYPE", "STATUS", "APPROVER"]
-    widths = [4, 20, 30, 18, 18, 20]
-    
-    print_table_header(headers, widths)
-    
-    for req in requests:
-        user = User.query.get(req.requester_id)
-        approver = User.query.get(req.approver_id) if req.approver_id else None
-        
-        status_color = Colors.WARNING if req.status == 'pending' else Colors.OKGREEN if req.status == 'approved' else Colors.FAIL
-        status_display = f"{req.status.upper()}"
-        
-        date_range = f"{req.start_date} to {req.end_date}"
-        
-        values = [
-            str(req.id),
-            user.username,
-            date_range,
-            req.type.upper(),
-            status_display,
-            approver.username if approver else 'None'
-        ]
-        
-        colors = [Colors.OKCYAN, Colors.ENDC, Colors.ENDC, Colors.OKBLUE, status_color, Colors.ENDC]
-        print_table_row(values, widths, colors)
-    
-    print_table_footer(widths)
-    print(f"\n{info_msg(f'Total leave requests: {len(requests)}')}")
-
-@leave_cli.command("approve", help="Approves a leave request")
-@click.argument("request_id", type=int)
-@click.argument("approver_id", type=int)
-def approve_leave_command(request_id, approver_id):
-    leave_request = LeaveRequest.query.get(request_id)
-    if not leave_request:
-        print(f"Error: Leave request with ID {request_id} not found")
-        return
-    
-    approver = User.query.get(approver_id)
-    if not approver or not approver.can_approve_requests():
-        print(f"Error: User {approver_id} cannot approve requests")
-        return
-    
-    leave_request.approve(approver_id)
-    db.session.commit()
-    print(f'Leave request {request_id} approved by {approver.username}')
-
-@leave_cli.command("reject", help="Rejects a leave request")
-@click.argument("request_id", type=int)
-@click.argument("approver_id", type=int)
-@click.option("--reason", help="Rejection reason")
-def reject_leave_command(request_id, approver_id, reason):
-    leave_request = LeaveRequest.query.get(request_id)
-    if not leave_request:
-        print(f"Error: Leave request with ID {request_id} not found")
-        return
-    
-    approver = User.query.get(approver_id)
-    if not approver or not approver.can_approve_requests():
-        print(f"Error: User {approver_id} cannot approve requests")
-        return
-    
-    leave_request.reject(approver_id, reason)
-    db.session.commit()
-    print(f'Leave request {request_id} rejected by {approver.username}')
-
-app.cli.add_command(leave_cli)
-
-'''
-Swap Request Commands
-'''
-
-swap_cli = AppGroup('swap', help='Shift swap management commands')
-
-@swap_cli.command("create", help="Creates a shift swap request")
-@click.argument("shift_id", type=int)
-@click.argument("from_user_id", type=int)
-@click.argument("to_user_id", type=int)
-@click.option("--note", help="Note for swap request")
-def create_swap_command(shift_id, from_user_id, to_user_id, note):
-    try:
-        shift = Shift.query.get(shift_id)
-        if not shift:
-            print(f"Error: Shift with ID {shift_id} not found")
-            return
-        
-        if shift.user_id != from_user_id:
-            print(f"Error: Shift {shift_id} is not assigned to user {from_user_id}")
-            return
-        
-        from_user = User.query.get(from_user_id)
-        to_user = User.query.get(to_user_id)
-        
-        if not from_user or not to_user:
-            print("Error: One or both users not found")
-            return
-        
-        swap_request = SwapRequest(shift_id, from_user_id, to_user_id, note)
-        db.session.add(swap_request)
-        db.session.commit()
-        print(f'Swap request created: {from_user.username} -> {to_user.username} for shift {shift_id}')
-    except Exception as e:
-        print(f'Error creating swap request: {e}')
-
-@swap_cli.command("list", help="Lists swap requests")
-@click.option("--status", help="Filter by status")
-def list_swap_command(status):
-    query = SwapRequest.query
-    
-    if status:
-        query = query.filter_by(status=status)
-    
-    requests = query.all()
-    
-    if not requests:
-        print("No swap requests found")
-        return
-    
-    print(header_msg("SHIFT SWAP REQUESTS"))
-    print_separator()
-    
-    headers = ["ID", "SHIFT DETAILS", "FROM", "TO", "STATUS", "APPROVER"]
-    widths = [4, 35, 18, 18, 18, 20]
-    
-    print_table_header(headers, widths)
-    
-    for req in requests:
-        from_user = User.query.get(req.from_user_id)
-        to_user = User.query.get(req.to_user_id)
-        shift = Shift.query.get(req.shift_id)
-        approver = User.query.get(req.approver_id) if req.approver_id else None
-        
-        status_color = Colors.WARNING if req.status == 'pending' else Colors.OKGREEN if req.status == 'approved' else Colors.FAIL
-        
-        shift_details = f"{shift.work_date} {shift.start_time}-{shift.end_time}"
-        
-        values = [
-            str(req.id),
-            shift_details,
-            from_user.username,
-            to_user.username,
-            req.status.upper(),
-            approver.username if approver else 'None'
-        ]
-        
-        colors = [Colors.OKCYAN, Colors.ENDC, Colors.FAIL, Colors.OKGREEN, status_color, Colors.ENDC]
-        print_table_row(values, widths, colors)
-    
-    print_table_footer(widths)
-    print(f"\n{info_msg(f'Total swap requests: {len(requests)}')}")
-
-@swap_cli.command("approve", help="Approves a swap request")
-@click.argument("request_id", type=int)
-@click.argument("approver_id", type=int)
-def approve_swap_command(request_id, approver_id):
-    swap_request = SwapRequest.query.get(request_id)
-    if not swap_request:
-        print(f"Error: Swap request with ID {request_id} not found")
-        return
-    
-    approver = User.query.get(approver_id)
-    if not approver or not approver.can_approve_requests():
-        print(f"Error: User {approver_id} cannot approve requests")
-        return
-    
-    swap_request.approve(approver_id)
-    print(f'Swap request {request_id} approved by {approver.username}')
-
-app.cli.add_command(swap_cli)
-
-'''
-Time Log Commands
-'''
-
-timelog_cli = AppGroup('timelog', help='Time logging commands')
-
-@timelog_cli.command("clockin", help="Clock in to a shift")
-@click.argument("shift_id", type=int)
-@click.argument("user_id", type=int)
-def clockin_command(shift_id, user_id):
-    try:
-        shift = Shift.query.get(shift_id)
-        if not shift:
-            print(f"Error: Shift with ID {shift_id} not found")
-            return
-        
-        if shift.user_id != user_id:
-            print(f"Error: Shift {shift_id} is not assigned to user {user_id}")
-            return
-        
-        # Check if user is already clocked in for this shift
-        existing_log = TimeLog.query.filter_by(shift_id=shift_id, user_id=user_id, clock_out=None).first()
-        if existing_log:
-            print("Error: User is already clocked in for this shift")
-            return
-        
-        time_log = TimeLog(shift_id, user_id)
-        db.session.add(time_log)
-        db.session.commit()
-        print(f'User {user_id} clocked in to shift {shift_id} at {time_log.clock_in}')
-    except Exception as e:
-        print(f'Error clocking in: {e}')
-
-@timelog_cli.command("clockout", help="Clock out from a shift")
-@click.argument("shift_id", type=int)
-@click.argument("user_id", type=int)
-def clockout_command(shift_id, user_id):
-    try:
-        time_log = TimeLog.query.filter_by(shift_id=shift_id, user_id=user_id, clock_out=None).first()
-        if not time_log:
-            print("Error: No open time log found for this shift and user")
-            return
-        
-        success, message = time_log.clock_out_now()
-        print(message)
-        if success:
-            print(f'Worked duration: {time_log.get_duration_string()}')
-    except Exception as e:
-        print(f'Error clocking out: {e}')
-
-@timelog_cli.command("list", help="Lists time logs")
-@click.option("--user-id", type=int, help="Filter by user ID")
-@click.option("--shift-id", type=int, help="Filter by shift ID")
-@click.option("--open-only", is_flag=True, help="Show only open time logs")
-def list_timelog_command(user_id, shift_id, open_only):
-    query = TimeLog.query
-    
-    if user_id:
-        query = query.filter_by(user_id=user_id)
-    if shift_id:
-        query = query.filter_by(shift_id=shift_id)
-    if open_only:
-        query = query.filter_by(clock_out=None)
-    
-    logs = query.all()
-    
-    if not logs:
-        print("No time logs found")
-        return
-    
-    print(header_msg("TIME LOGS"))
-    print_separator()
-    
-    headers = ["ID", "EMPLOYEE", "DATE", "CLOCK IN", "DURATION", "STATUS"]
-    widths = [4, 20, 16, 15, 18, 15]
-    
-    print_table_header(headers, widths)
-    
-    for log in logs:
-        user = User.query.get(log.user_id)
-        shift = Shift.query.get(log.shift_id)
-        status = "🔓 Open" if log.is_open() else "🔒 Closed"
-        status_color = Colors.WARNING if log.is_open() else Colors.OKGREEN
-        
-        clock_in_time = log.clock_in.strftime('%H:%M') if log.clock_in else 'N/A'
-        
-        values = [
-            str(log.id),
-            user.username,
-            str(shift.work_date),
-            clock_in_time,
-            log.get_duration_string(),
-            status
-        ]
-        
-        colors = [Colors.OKCYAN, Colors.ENDC, Colors.ENDC, Colors.ENDC, Colors.OKBLUE, status_color]
-        print_table_row(values, widths, colors)
-    
-    print_table_footer(widths)
-    print(f"\n{info_msg(f'Total time logs: {len(logs)}')}")
-
-app.cli.add_command(timelog_cli)
-
-'''
-Roster Commands
-'''
-
-roster_cli = AppGroup('roster', help='Roster management commands')
-
-@roster_cli.command("view", help="View roster for a date range")
-@click.argument("start_date")  # YYYY-MM-DD format
-@click.argument("end_date")  # YYYY-MM-DD format
-def view_roster_command(start_date, end_date):
-    try:
-        print(header_msg("STAFF ROSTER"))
-        start = datetime.strptime(start_date, '%Y-%m-%d').date()
-        end = datetime.strptime(end_date, '%Y-%m-%d').date()
-        
-        print(f"{Colors.OKCYAN}📅 Period: {start_date} to {end_date} ({(end-start).days + 1} days){Colors.ENDC}")
-        print_separator()
-        
-        shifts = Shift.query.filter(
-            Shift.work_date >= start,
-            Shift.work_date <= end
-        ).order_by(Shift.work_date, Shift.start_time).all()
-        
-        if not shifts:
-            print(warning_msg(f"No shifts scheduled between {start_date} and {end_date}"))
-            return
-        
-        current_date = None
-        day_count = 0
-        
-        for shift in shifts:
-            if current_date != shift.work_date:
-                current_date = shift.work_date
-                day_count += 1
-                
-                # Day header with emoji for day of week
-                day_emoji = {
-                    'Monday': '💼', 'Tuesday': '📋', 'Wednesday': '⚡', 
-                    'Thursday': '📊', 'Friday': '🎯', 'Saturday': '🌟', 'Sunday': '🔔'
-                }
-                day_name = current_date.strftime('%A')
-                emoji = day_emoji.get(day_name, '📅')
-                
-                print(f"\n{Colors.BOLD}{Colors.HEADER}{emoji} {current_date} - {day_name}{Colors.ENDC}")
-                print(f"{Colors.OKCYAN}{'─' * 60}{Colors.ENDC}")
-            
-            user = User.query.get(shift.user_id)
-            
-            # Role badges
-            role_badge = {'admin': '👑', 'supervisor': '⭐', 'staff': '👤'}
-            badge = role_badge.get(user.role, '👤')
-            
-            # Status indicators
-            status_indicator = {'scheduled': '⏰', 'completed': '✅', 'cancelled': '❌'}
-            indicator = status_indicator.get(shift.status, '❓')
-            
-            # Time formatting
-            duration = shift.duration_hours()
-            duration_color = Colors.OKGREEN if duration <= 8 else Colors.WARNING if duration <= 10 else Colors.FAIL
-            
-            print(f"  {indicator} {Colors.BOLD}{shift.start_time} - {shift.end_time}{Colors.ENDC} "
-                  f"{badge} {user.username} ({user.role}) "
-                  f"{duration_color}[{duration:.1f}h]{Colors.ENDC}")
-        
-        print_separator()
-        
-        # Summary statistics
-        total_hours = sum(shift.duration_hours() for shift in shifts)
-        unique_staff = len(set(shift.user_id for shift in shifts))
-        
-        print(f"{Colors.BOLD}📊 SUMMARY:{Colors.ENDC}")
-        print(f"   • Total Shifts: {len(shifts)}")
-        print(f"   • Total Hours: {total_hours:.1f}h")
-        print(f"   • Staff Members: {unique_staff}")
-        print(f"   • Days with Coverage: {day_count}")
-    
-    except Exception as e:
-        print(error_msg(f"Error viewing roster: {e}"))
-
-@roster_cli.command("report", help="Generate weekly report")
-@click.argument("start_date")  # YYYY-MM-DD format (start of week)
-def weekly_report_command(start_date):
-    try:
-        start = datetime.strptime(start_date, '%Y-%m-%d').date()
-        end = start + timedelta(days=6)  # End of week
-        
-        print(header_msg("📊 WEEKLY PERFORMANCE REPORT"))
-        print(f"{Colors.OKCYAN}📅 Week of {start} to {end}{Colors.ENDC}")
-        print_separator()
-        
-        # Get all shifts for the week
-        shifts = Shift.query.filter(
-            Shift.work_date >= start,
-            Shift.work_date <= end
-        ).all()
-        
-        # Get all time logs for the week
-        time_logs = TimeLog.query.join(Shift).filter(
-            Shift.work_date >= start,
-            Shift.work_date <= end
-        ).all()
-        
-        if not shifts:
-            print(warning_msg("No shifts found for this week"))
-            return
-        
-        # Calculate statistics by user
-        user_stats = {}
-        total_scheduled = 0
-        total_worked = 0
-        
-        for shift in shifts:
-            user_id = shift.user_id
-            if user_id not in user_stats:
-                user_stats[user_id] = {
-                    'scheduled_hours': 0,
-                    'worked_hours': 0,
-                    'shifts_count': 0,
-                    'completed_shifts': 0
-                }
-            
-            hours = shift.duration_hours()
-            user_stats[user_id]['scheduled_hours'] += hours
-            user_stats[user_id]['shifts_count'] += 1
-            total_scheduled += hours
-            
-            if shift.status == 'completed':
-                user_stats[user_id]['completed_shifts'] += 1
-        
-        for log in time_logs:
-            user_id = log.user_id
-            if user_id in user_stats:
-                hours = log.worked_hours()
-                user_stats[user_id]['worked_hours'] += hours
-                total_worked += hours
-        
-        # Display performance table
-        print(f"{Colors.BOLD}👥 STAFF PERFORMANCE{Colors.ENDC}")
-        print()
-        
-        headers = ["EMPLOYEE", "ROLE", "SCHEDULED", "WORKED", "SHIFTS", "COMPLETION"]
-        widths = [22, 20, 16, 16, 14, 25]
-        
-        print_table_header(headers, widths)
-        
-        for user_id, stats in user_stats.items():
-            user = User.query.get(user_id)
-            completion_rate = (stats['completed_shifts'] / stats['shifts_count'] * 100) if stats['shifts_count'] > 0 else 0
-            
-            # Performance indicators
-            if completion_rate >= 90:
-                perf_color = Colors.OKGREEN
-                perf_icon = " 🌟"
-            elif completion_rate >= 70:
-                perf_color = Colors.WARNING
-                perf_icon = " ⚡"
-            else:
-                perf_color = Colors.FAIL
-                perf_icon = " ⚠️"
-            
-            role_badge = {'admin': '👑', 'supervisor': '⭐', 'staff': '👤'}
-            badge = role_badge.get(user.role, '👤')
-            
-            values = [
-                user.username,
-                f"{badge} {user.role}",
-                f"{stats['scheduled_hours']:.1f}h",
-                f"{stats['worked_hours']:.1f}h",
-                str(stats['shifts_count']),
-                f"{completion_rate:.1f}%{perf_icon}"
-            ]
-            
-            colors = [Colors.ENDC, Colors.ENDC, Colors.OKCYAN, Colors.OKBLUE, Colors.ENDC, perf_color]
-            print_table_row(values, widths, colors)
-        
-        print_table_footer(widths)
-        
-        # Summary statistics
-        print(f"\n{Colors.BOLD}📈 WEEK SUMMARY{Colors.ENDC}")
-        print_separator("─", 40)
-        
-        efficiency = (total_worked / total_scheduled * 100) if total_scheduled > 0 else 0
-        efficiency_icon = "🎯" if efficiency >= 90 else "📊" if efficiency >= 80 else "📉"
-        
-        print(f"📋 Total Shifts Scheduled: {len(shifts)}")
-        print(f"⏰ Total Scheduled Hours: {total_scheduled:.1f}h")
-        print(f"✅ Total Worked Hours: {total_worked:.1f}h")
-        print(f"📊 Overall Efficiency: {efficiency:.1f}% {efficiency_icon}")
-        print(f"👥 Active Staff Members: {len(user_stats)}")
-        
-        # Leave requests summary
-        leave_requests = LeaveRequest.query.filter(
-            LeaveRequest.start_date <= end,
-            LeaveRequest.end_date >= start
-        ).all()
-        
-        if leave_requests:
-            print(f"\n{Colors.BOLD}🏖️  LEAVE REQUESTS{Colors.ENDC}")
-            print_separator("─", 60)
-            
-            status_icons = {'pending': '⏳', 'approved': '✅', 'rejected': '❌'}
-            
-            for req in leave_requests:
-                user = User.query.get(req.requester_id)
-                icon = status_icons.get(req.status, '❓')
-                status_color = Colors.WARNING if req.status == 'pending' else Colors.OKGREEN if req.status == 'approved' else Colors.FAIL
-                
-                print(f"{icon} {user.username}: {req.type.upper()} "
-                      f"({req.start_date} to {req.end_date}) - "
-                      f"{status_color}{req.status.upper()}{Colors.ENDC}")
-        
-        # Recommendations
-        print(f"\n{Colors.BOLD}💡 RECOMMENDATIONS{Colors.ENDC}")
-        print_separator("─", 50)
-        
-        if efficiency < 80:
-            print(f"{Colors.WARNING}⚠️  Consider reviewing scheduling efficiency{Colors.ENDC}")
-        if len([s for s in user_stats.values() if (s['completed_shifts'] / s['shifts_count'] * 100) < 70]) > 0:
-            print(f"{Colors.WARNING}⚠️  Some staff members have low completion rates{Colors.ENDC}")
-        if efficiency >= 95:
-            print(f"{Colors.OKGREEN}🌟 Excellent week! Team is performing at optimal levels{Colors.ENDC}")
-    
-    except Exception as e:
-        print(error_msg(f"Error generating report: {e}"))
-
-app.cli.add_command(roster_cli)
